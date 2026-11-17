@@ -39,6 +39,8 @@ secrets.json
 .env
 .env.*
 !.env.example
+SETUP-CLIENT.md
+SETUP-CLIENT*.md
 
 ## OS generated files
 .DS_Store
