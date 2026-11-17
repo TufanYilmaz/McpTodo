@@ -1,53 +1,143 @@
-﻿using Microsoft.EntityFrameworkCore;
+﻿using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.Http;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
+using ModelContextProtocol.AspNetCore;
+using ModelContextProtocol.Server;
 using mcp_todo.Data;
 using mcp_todo.Services;
 using mcp_todo.Tools;
 
-var builder = Host.CreateApplicationBuilder(args);
+// Check mode: Stdio (CLI desktop) or Web / HTTP (Render / Cloud / Webhook)
+var isPortDefined = !string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("PORT"));
+var isHttpArg = args.Contains("--http");
+var isStdioArg = args.Contains("--stdio");
+var isWebMode = isPortDefined || isHttpArg || (!isStdioArg && !Console.IsInputRedirected);
 
-// D-12: Redirect all console logging to stderr so stdout is strictly reserved for JSON-RPC messages.
-builder.Logging.AddConsole(options =>
+if (!isWebMode)
 {
-    options.LogToStandardErrorThreshold = LogLevel.Trace;
-});
+    // ==========================================
+    // 1. STDIO MODE (Claude Desktop / Cursor CLI)
+    // ==========================================
+    var stdioBuilder = Host.CreateApplicationBuilder(args);
 
-// Load configuration
-builder.Configuration.AddUserSecrets<AppDbContextFactory>(optional: true);
-
-var connectionString = builder.Configuration.GetConnectionString("Supabase")
-    ?? builder.Configuration["ConnectionStrings:Supabase"]
-    ?? Environment.GetEnvironmentVariable("ConnectionStrings__Supabase")
-    ?? Environment.GetEnvironmentVariable("SUPABASE_CONNECTION_STRING");
-
-// Dependency Injection
-builder.Services.AddScoped<ICurrentUserService, DevCurrentUserService>();
-builder.Services.AddScoped<ProjectTools>();
-builder.Services.AddScoped<TodoTools>();
-
-builder.Services.AddDbContext<AppDbContext>(options =>
-{
-    if (!string.IsNullOrWhiteSpace(connectionString))
+    // D-12: Redirect all console logging to stderr so stdout is strictly reserved for JSON-RPC messages.
+    stdioBuilder.Logging.AddConsole(options =>
     {
-        options.UseNpgsql(connectionString, npgsqlOptions =>
-        {
-            npgsqlOptions.EnableRetryOnFailure(
-                maxRetryCount: 5,
-                maxRetryDelay: TimeSpan.FromSeconds(10),
-                errorCodesToAdd: null);
-        });
+        options.LogToStandardErrorThreshold = LogLevel.Trace;
+    });
+
+    ConfigureServices(stdioBuilder.Configuration, stdioBuilder.Services);
+
+    stdioBuilder.Services.AddMcpServer()
+        .WithStdioServerTransport()
+        .WithToolsFromAssembly();
+
+    if (args.Contains("--verify-tools"))
+    {
+        RunToolsVerification();
+        return;
     }
-});
 
-// MCP Server registration
-builder.Services.AddMcpServer()
-    .WithStdioServerTransport()
-    .WithToolsFromAssembly();
+    var stdioHost = stdioBuilder.Build();
+    await stdioHost.RunAsync();
+}
+else
+{
+    // ==========================================
+    // 2. WEB / HTTP & SSE MODE (Render.com / Cloud)
+    // ==========================================
+    var webBuilder = WebApplication.CreateBuilder(args);
 
-if (args.Contains("--verify-tools"))
+    // Support Render.com dynamic PORT
+    var port = Environment.GetEnvironmentVariable("PORT") ?? "8080";
+    webBuilder.WebHost.ConfigureKestrel(options =>
+    {
+        options.ListenAnyIP(int.Parse(port));
+    });
+
+    ConfigureServices(webBuilder.Configuration, webBuilder.Services);
+
+    // Register MCP Server with modern Streamable HTTP transport (/mcp)
+    webBuilder.Services.AddMcpServer()
+        .WithHttpTransport()
+        .WithToolsFromAssembly();
+
+    var app = webBuilder.Build();
+
+    // Map MCP Endpoint at /mcp (e.g. site.com/mcp)
+    app.MapMcp("/mcp");
+
+    // Also map root MCP endpoint for clients expecting /
+    app.MapMcp();
+
+    // Health Check Endpoint (For Render.com and monitoring)
+    app.MapGet("/health", () => Results.Ok(new
+    {
+        status = "healthy",
+        service = "McpServer.Todo",
+        timestamp = DateTime.UtcNow
+    }));
+
+    // Informational Root Endpoint (Friendly browser response)
+    app.MapGet("/", () => Results.Ok(new
+    {
+        service = "McpServer.Todo",
+        description = "Model Context Protocol Server for Supabase & Descope",
+        mcpEndpoint = "/mcp",
+        healthEndpoint = "/health",
+        availableTools = new[]
+        {
+            "project_list", "project_create", "project_delete",
+            "todo_list", "todo_add", "todo_complete", "todo_delete"
+        }
+    }));
+
+    if (args.Contains("--verify-tools"))
+    {
+        RunToolsVerification();
+        return;
+    }
+
+    Console.WriteLine($"[INFO] MCP Server started in HTTP/SSE Web Mode on port {port}.");
+    Console.WriteLine($"[INFO] MCP Endpoint: http://localhost:{port}/mcp");
+    Console.WriteLine($"[INFO] Health Check: http://localhost:{port}/health");
+
+    await app.RunAsync();
+}
+
+static void ConfigureServices(IConfigurationManager configuration, IServiceCollection services)
+{
+    configuration.AddUserSecrets<AppDbContextFactory>(optional: true);
+
+    var connectionString = configuration.GetConnectionString("Supabase")
+        ?? configuration["ConnectionStrings:Supabase"]
+        ?? Environment.GetEnvironmentVariable("ConnectionStrings__Supabase")
+        ?? Environment.GetEnvironmentVariable("SUPABASE_CONNECTION_STRING");
+
+    services.AddScoped<ICurrentUserService, DevCurrentUserService>();
+    services.AddScoped<ProjectTools>();
+    services.AddScoped<TodoTools>();
+
+    services.AddDbContext<AppDbContext>(options =>
+    {
+        if (!string.IsNullOrWhiteSpace(connectionString))
+        {
+            options.UseNpgsql(connectionString, npgsqlOptions =>
+            {
+                npgsqlOptions.EnableRetryOnFailure(
+                    maxRetryCount: 5,
+                    maxRetryDelay: TimeSpan.FromSeconds(10),
+                    errorCodesToAdd: null);
+            });
+        }
+    });
+}
+
+static void RunToolsVerification()
 {
     Console.Error.WriteLine("=== MCP TOOLS VERIFICATION ===");
     var toolTypes = new[] { typeof(ProjectTools), typeof(TodoTools) };
@@ -56,11 +146,11 @@ if (args.Contains("--verify-tools"))
     {
         Console.Error.WriteLine($"[ToolType] {type.Name}");
         var methods = type.GetMethods()
-            .Where(m => m.GetCustomAttributes(typeof(ModelContextProtocol.Server.McpServerToolAttribute), false).Any());
+            .Where(m => m.GetCustomAttributes(typeof(McpServerToolAttribute), false).Any());
         foreach (var m in methods)
         {
             toolCount++;
-            var toolAttr = (ModelContextProtocol.Server.McpServerToolAttribute)m.GetCustomAttributes(typeof(ModelContextProtocol.Server.McpServerToolAttribute), false).First();
+            var toolAttr = (McpServerToolAttribute)m.GetCustomAttributes(typeof(McpServerToolAttribute), false).First();
             var descAttr = (System.ComponentModel.DescriptionAttribute?)m.GetCustomAttributes(typeof(System.ComponentModel.DescriptionAttribute), false).FirstOrDefault();
             Console.Error.WriteLine($"  -> Tool: {toolAttr.Name} | Title: {toolAttr.Title} | Desc: {descAttr?.Description}");
             foreach (var p in m.GetParameters())
@@ -90,9 +180,4 @@ if (args.Contains("--verify-tools"))
     var groupedOutput = mcp_todo.Tools.Formatters.MarkdownFormatter.FormatGroupedTodoList(new[] { grouping });
     Console.Error.WriteLine("--- FormatGroupedTodoList Test Output ---");
     Console.Error.WriteLine(groupedOutput);
-
-    return;
 }
-
-var host = builder.Build();
-await host.RunAsync();
