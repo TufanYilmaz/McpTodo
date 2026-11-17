@@ -1,190 +1,98 @@
 ﻿using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Logging;
 using mcp_todo.Data;
-using mcp_todo.Models;
 using mcp_todo.Services;
+using mcp_todo.Tools;
 
-Console.WriteLine("=== MCP Todo EF Core Verification ===");
+var builder = Host.CreateApplicationBuilder(args);
 
-// 1. Build Configuration
-var configuration = new ConfigurationBuilder()
-    .AddUserSecrets<AppDbContextFactory>(optional: true)
-    .Build();
+// D-12: Redirect all console logging to stderr so stdout is strictly reserved for JSON-RPC messages.
+builder.Logging.AddConsole(options =>
+{
+    options.LogToStandardErrorThreshold = LogLevel.Trace;
+});
 
-var connectionString = configuration.GetConnectionString("Supabase")
-    ?? configuration["ConnectionStrings:Supabase"]
+// Load configuration
+builder.Configuration.AddUserSecrets<AppDbContextFactory>(optional: true);
+
+var connectionString = builder.Configuration.GetConnectionString("Supabase")
+    ?? builder.Configuration["ConnectionStrings:Supabase"]
     ?? Environment.GetEnvironmentVariable("ConnectionStrings__Supabase")
     ?? Environment.GetEnvironmentVariable("SUPABASE_CONNECTION_STRING");
 
-if (string.IsNullOrWhiteSpace(connectionString))
-{
-    Console.WriteLine("[ERROR] Supabase connection Env değerlerinden oku");
-    return;
-}
+// Dependency Injection
+builder.Services.AddScoped<ICurrentUserService, DevCurrentUserService>();
+builder.Services.AddScoped<ProjectTools>();
+builder.Services.AddScoped<TodoTools>();
 
-Console.WriteLine("[INFO] Başarılı bir şekilde yüklendi.");
-
-// 2. Setup Dependency Injection
-var services = new ServiceCollection();
-services.AddScoped<ICurrentUserService, DevCurrentUserService>();
-services.AddDbContext<AppDbContext>(options =>
+builder.Services.AddDbContext<AppDbContext>(options =>
 {
-    options.UseNpgsql(connectionString, npgsqlOptions =>
+    if (!string.IsNullOrWhiteSpace(connectionString))
     {
-        npgsqlOptions.EnableRetryOnFailure(
-            maxRetryCount: 5,
-            maxRetryDelay: TimeSpan.FromSeconds(10),
-            errorCodesToAdd: null);
-    });
+        options.UseNpgsql(connectionString, npgsqlOptions =>
+        {
+            npgsqlOptions.EnableRetryOnFailure(
+                maxRetryCount: 5,
+                maxRetryDelay: TimeSpan.FromSeconds(10),
+                errorCodesToAdd: null);
+        });
+    }
 });
 
-var serviceProvider = services.BuildServiceProvider();
+// MCP Server registration
+builder.Services.AddMcpServer()
+    .WithStdioServerTransport()
+    .WithToolsFromAssembly();
 
-using var scope = serviceProvider.CreateScope();
-var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
-var currentUserService = scope.ServiceProvider.GetRequiredService<ICurrentUserService>();
-
-// 3. Test Query String generation (Global Query Filter verification)
-Console.WriteLine($"[INFO] Current User ID: {currentUserService.UserId}");
-var projectSql = db.Projects.ToQueryString();
-Console.WriteLine($"[DEBUG] Project SQL: {projectSql}");
-
-bool filterVerified = projectSql.Contains("user_id", StringComparison.OrdinalIgnoreCase) &&
-                      projectSql.Contains("is_deleted", StringComparison.OrdinalIgnoreCase);
-
-if (!filterVerified)
+if (args.Contains("--verify-tools"))
 {
-    Console.WriteLine("[ERROR] Filtre oluşturulamadı!");
-    return;
-}
-Console.WriteLine("[INFO] Global filtreleme başarılı.");
-
-// 4. Test Database Connection
-Console.WriteLine("[INFO]  Supabase bağlantısını test et...");
-try
-{
-    await db.Database.OpenConnectionAsync();
-    Console.WriteLine("[INFO] Başarılı bir şekilde bağlantı oluşturuldu.");
-    await db.Database.CloseConnectionAsync();
-}
-catch (Exception ex)
-{
-    Console.WriteLine($"[DEBUG] Connection exception: {ex.GetType().FullName}: {ex.Message}");
-    if (ex.InnerException != null)
+    Console.Error.WriteLine("=== MCP TOOLS VERIFICATION ===");
+    var toolTypes = new[] { typeof(ProjectTools), typeof(TodoTools) };
+    var toolCount = 0;
+    foreach (var type in toolTypes)
     {
-        Console.WriteLine($"[DEBUG] Inner exception: {ex.InnerException.GetType().FullName}: {ex.InnerException.Message}");
+        Console.Error.WriteLine($"[ToolType] {type.Name}");
+        var methods = type.GetMethods()
+            .Where(m => m.GetCustomAttributes(typeof(ModelContextProtocol.Server.McpServerToolAttribute), false).Any());
+        foreach (var m in methods)
+        {
+            toolCount++;
+            var toolAttr = (ModelContextProtocol.Server.McpServerToolAttribute)m.GetCustomAttributes(typeof(ModelContextProtocol.Server.McpServerToolAttribute), false).First();
+            var descAttr = (System.ComponentModel.DescriptionAttribute?)m.GetCustomAttributes(typeof(System.ComponentModel.DescriptionAttribute), false).FirstOrDefault();
+            Console.Error.WriteLine($"  -> Tool: {toolAttr.Name} | Title: {toolAttr.Title} | Desc: {descAttr?.Description}");
+            foreach (var p in m.GetParameters())
+            {
+                if (p.ParameterType != typeof(CancellationToken))
+                {
+                    var pDesc = (System.ComponentModel.DescriptionAttribute?)p.GetCustomAttributes(typeof(System.ComponentModel.DescriptionAttribute), false).FirstOrDefault();
+                    Console.Error.WriteLine($"       Param: {p.Name} ({p.ParameterType.Name}, Optional={p.IsOptional}) | Desc: {pDesc?.Description}");
+                }
+            }
+        }
     }
-}
-bool canConnect = await db.Database.CanConnectAsync();
-if (!canConnect)
-{
-    Console.WriteLine("[ERROR]  Supabase database bağlanamadı.");
-    return;
-}
-Console.WriteLine("[INFO] Başarılı bir şekilde bağlandı.");
+    Console.Error.WriteLine($"=== TOTAL TOOLS: {toolCount} ===");
 
-// Apply migrations if needed to ensure tables exist
-try
-{
-    Console.WriteLine("[INFO] Migratin başla...");
-    await db.Database.MigrateAsync();
-    Console.WriteLine("[INFO] Migration bitir.");
-}
-catch (Exception ex)
-{
-    Console.WriteLine($"[WARN] Migration  note: {ex.Message}");
-}
-
-// 5. Test CRUD, HasQueryFilter and Soft Delete in Database
-var testUserId = currentUserService.GetRequiredUserId();
-
-// Ensure test user exists
-var user = await db.Users.FindAsync(testUserId);
-if (user == null)
-{
-    user = new User
+    // Test MarkdownFormatter
+    var testProject = new mcp_todo.Models.Project { Id = 1, Name = "İş Projesi" };
+    var testTodos = new List<mcp_todo.Models.Todo>
     {
-        Id = testUserId,
-        Email = "dev@example.com",
-        Name = "Default Dev User"
+        new() { Id = 101, Title = "Rapor Hazırla", DueDate = new DateTime(2026, 12, 1, 0, 0, 0, DateTimeKind.Utc), IsCompleted = false },
+        new() { Id = 102, Title = "Mail Gönder", DueDate = null, IsCompleted = true }
     };
-    db.Users.Add(user);
-    await db.SaveChangesAsync();
-    Console.WriteLine($"[INFO] user oluşturuldu: {testUserId}");
-}
+    var singleOutput = mcp_todo.Tools.Formatters.MarkdownFormatter.FormatTodoList(testTodos);
+    Console.Error.WriteLine("--- FormatTodoList Test Output ---");
+    Console.Error.WriteLine(singleOutput);
 
-// Create test project
-var project = new Project
-{
-    UserId = testUserId,
-    Name = "Verification Project " + Guid.NewGuid().ToString("N")[..8],
-    Description = "Testing query filter and soft delete"
-};
-db.Projects.Add(project);
-await db.SaveChangesAsync();
-Console.WriteLine($"[INFO] project oluşturuldu  Id: {project.Id}");
+    var grouping = new mcp_todo.Tools.Formatters.ProjectTodoGrouping(testProject, testTodos);
+    var groupedOutput = mcp_todo.Tools.Formatters.MarkdownFormatter.FormatGroupedTodoList(new[] { grouping });
+    Console.Error.WriteLine("--- FormatGroupedTodoList Test Output ---");
+    Console.Error.WriteLine(groupedOutput);
 
-// Create test todo
-var todo = new Todo
-{
-    ProjectId = project.Id,
-    UserId = testUserId,
-    Title = "Verification Todo Item",
-    DueDate = DateTime.UtcNow.AddDays(1)
-};
-db.Todos.Add(todo);
-await db.SaveChangesAsync();
-Console.WriteLine($"[INFO]  todo oluşturuldu Id: {todo.Id}");
-
-// Verify listing via Query Filter
-var activeProjects = await db.Projects.ToListAsync();
-if (!activeProjects.Any(p => p.Id == project.Id))
-{
-    Console.WriteLine("[ERROR] Oluşturulan proje bulunamadı!");
     return;
 }
 
-// Test Soft Delete on Todo
-db.Todos.Remove(todo);
-await db.SaveChangesAsync();
-Console.WriteLine($"[INFO] Executed db.Todos.Remove(todo). IsDeleted in memory: {todo.IsDeleted}");
-
-if (!todo.IsDeleted)
-{
-    Console.WriteLine("[ERROR] Todo.IsDeleted was not set to true after Remove()!");
-    return;
-}
-
-// Verify Todo is filtered out by HasQueryFilter
-var queryTodo = await db.Todos.FirstOrDefaultAsync(t => t.Id == todo.Id);
-if (queryTodo != null)
-{
-    Console.WriteLine("[ERROR] Deleted todo was returned by standard query filter!");
-    return;
-}
-Console.WriteLine("[INFO] Deleted todo is correctly filtered out by HasQueryFilter.");
-
-// Verify Todo still exists in database when query filter is ignored
-var rawTodo = await db.Todos.IgnoreQueryFilters().FirstOrDefaultAsync(t => t.Id == todo.Id);
-if (rawTodo == null || !rawTodo.IsDeleted)
-{
-    Console.WriteLine("[ERROR] Todo record not found or not marked deleted when ignoring query filters!");
-    return;
-}
-Console.WriteLine("[INFO] Todo verified physically present in DB with is_deleted = true.");
-
-// Clean up: delete project (which soft-deletes project)
-db.Projects.Remove(project);
-await db.SaveChangesAsync();
-Console.WriteLine($"[INFO] Executed db.Projects.Remove(project). IsDeleted in memory: {project.IsDeleted}");
-
-var queryProject = await db.Projects.FirstOrDefaultAsync(p => p.Id == project.Id);
-if (queryProject != null)
-{
-    Console.WriteLine("[ERROR] Deleted project was returned by standard query filter!");
-    return;
-}
-Console.WriteLine("[INFO] Deleted project is correctly filtered out by HasQueryFilter.");
-
-Console.WriteLine("[SUCCESS] EF Core AppDbContext and Query Filter verified.");
+var host = builder.Build();
+await host.RunAsync();
