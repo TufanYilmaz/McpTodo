@@ -157,7 +157,7 @@ else
             issuer = serverUrl,
             authorization_endpoint = $"{host}/oauth2/v1/apps/agentic/{projectId}/{appId}/authorize",
             token_endpoint = $"{host}/oauth2/v1/apps/agentic/{projectId}/{appId}/token",
-            jwks_uri = $"{host}/v1/apps/agentic/{projectId}/{appId}/.well-known/jwks.json",
+            jwks_uri = $"{host}/{projectId}/.well-known/jwks.json",
             registration_endpoint = $"{serverUrl}/register",
             response_types_supported = new[] { "code" },
             grant_types_supported = new[] { "authorization_code", "refresh_token" },
@@ -166,59 +166,42 @@ else
         });
     });
 
-    // RFC 7591: OAuth 2.0 Dynamic Client Registration Endpoint
+    // RFC 7591: OAuth 2.0 Dynamic Client Registration Proxy to Descope
     app.MapPost("/register", async (HttpContext httpContext, IConfiguration config) =>
     {
+        var projectId = GetDescopeProjectId(config);
         var appId = GetDescopeAppId(config);
-        if (string.IsNullOrWhiteSpace(appId))
+
+        if (string.IsNullOrWhiteSpace(projectId) || string.IsNullOrWhiteSpace(appId))
         {
-            return Results.Problem("DESCOPE_APP_ID environment variable is not configured.", statusCode: StatusCodes.Status500InternalServerError);
+            return Results.Problem("DESCOPE_PROJECT_ID or DESCOPE_APP_ID is not configured.", statusCode: StatusCodes.Status500InternalServerError);
         }
 
-        string clientName = "Claude";
-        var redirectUris = new List<string> { "https://claude.ai/api/mcp/auth_callback" };
+        var host = projectId.StartsWith("Peuc1", StringComparison.OrdinalIgnoreCase)
+            ? "https://api.euc1.descope.com"
+            : "https://api.descope.com";
+
+        var descopeRegisterUrl = $"{host}/v1/mgmt/mcp/client/{projectId}/{appId}/register";
+
+        using var reader = new System.IO.StreamReader(httpContext.Request.Body);
+        var requestBody = await reader.ReadToEndAsync();
 
         try
         {
-            using var reader = new System.IO.StreamReader(httpContext.Request.Body);
-            var body = await reader.ReadToEndAsync();
-            if (!string.IsNullOrWhiteSpace(body))
-            {
-                using var doc = System.Text.Json.JsonDocument.Parse(body);
-                if (doc.RootElement.TryGetProperty("client_name", out var nameProp))
-                {
-                    clientName = nameProp.GetString() ?? clientName;
-                }
-                if (doc.RootElement.TryGetProperty("redirect_uris", out var urisProp) && urisProp.ValueKind == System.Text.Json.JsonValueKind.Array)
-                {
-                    redirectUris.Clear();
-                    foreach (var el in urisProp.EnumerateArray())
-                    {
-                        var uri = el.GetString();
-                        if (!string.IsNullOrWhiteSpace(uri))
-                        {
-                            redirectUris.Add(uri);
-                        }
-                    }
-                }
-            }
-        }
-        catch
-        {
-            // Use defaults if body parse fails
-        }
+            using var client = new HttpClient();
+            client.DefaultRequestHeaders.UserAgent.ParseAdd("Mozilla/5.0 (compatible; McpTodoProxy/1.0)");
 
-        var response = new
-        {
-            client_id = appId,
-            client_name = clientName,
-            redirect_uris = redirectUris,
-            grant_types = new[] { "authorization_code" },
-            response_types = new[] { "code" },
-            token_endpoint_auth_method = "none"
-        };
+            using var content = new StringContent(requestBody, System.Text.Encoding.UTF8, "application/json");
+            var response = await client.PostAsync(descopeRegisterUrl, content);
 
-        return Results.Json(response, statusCode: StatusCodes.Status201Created);
+            var responseBody = await response.Content.ReadAsStringAsync();
+            return Results.Content(responseBody, "application/json", statusCode: (int)response.StatusCode);
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"[RegisterProxy] Error forwarding to Descope: {ex.Message}");
+            return Results.Problem("Failed to register client with Descope.", statusCode: StatusCodes.Status502BadGateway);
+        }
     });
 
     // OAuth 401 Challenge Middleware for unauthenticated MCP requests
