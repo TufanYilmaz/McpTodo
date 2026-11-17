@@ -55,17 +55,17 @@ bool filterVerified = projectSql.Contains("user_id", StringComparison.OrdinalIgn
 
 if (!filterVerified)
 {
-    Console.WriteLine("[ERROR] Query filter is not present in generated SQL!");
+    Console.WriteLine("[ERROR] Filtre oluşturulamadı!");
     return;
 }
-Console.WriteLine("[INFO] Global Query Filter SQL translation verified.");
+Console.WriteLine("[INFO] Global filtreleme başarılı.");
 
 // 4. Test Database Connection
-Console.WriteLine("[INFO] Testing Supabase database connection...");
+Console.WriteLine("[INFO]  Supabase bağlantısını test et...");
 try
 {
     await db.Database.OpenConnectionAsync();
-    Console.WriteLine("[INFO] Connection opened successfully via OpenConnectionAsync.");
+    Console.WriteLine("[INFO] Başarılı bir şekilde bağlantı oluşturuldu.");
     await db.Database.CloseConnectionAsync();
 }
 catch (Exception ex)
@@ -79,21 +79,21 @@ catch (Exception ex)
 bool canConnect = await db.Database.CanConnectAsync();
 if (!canConnect)
 {
-    Console.WriteLine("[ERROR] Could not connect to Supabase database.");
+    Console.WriteLine("[ERROR]  Supabase database bağlanamadı.");
     return;
 }
-Console.WriteLine("[INFO] Successfully connected to Supabase PostgreSQL database.");
+Console.WriteLine("[INFO] Başarılı bir şekilde bağlandı.");
 
 // Apply migrations if needed to ensure tables exist
 try
 {
-    Console.WriteLine("[INFO] Checking database migrations...");
+    Console.WriteLine("[INFO] Migratin başla...");
     await db.Database.MigrateAsync();
-    Console.WriteLine("[INFO] Migrations up to date.");
+    Console.WriteLine("[INFO] Migration bitir.");
 }
 catch (Exception ex)
 {
-    Console.WriteLine($"[WARN] Migration check note: {ex.Message}");
+    Console.WriteLine($"[WARN] Migration  note: {ex.Message}");
 }
 
 // 5. Test CRUD, HasQueryFilter and Soft Delete in Database
@@ -111,7 +111,7 @@ if (user == null)
     };
     db.Users.Add(user);
     await db.SaveChangesAsync();
-    Console.WriteLine($"[INFO] Created user: {testUserId}");
+    Console.WriteLine($"[INFO] user oluşturuldu: {testUserId}");
 }
 
 // Create test project
@@ -123,7 +123,7 @@ var project = new Project
 };
 db.Projects.Add(project);
 await db.SaveChangesAsync();
-Console.WriteLine($"[INFO] Created project with Id: {project.Id}");
+Console.WriteLine($"[INFO] project oluşturuldu  Id: {project.Id}");
 
 // Create test todo
 var todo = new Todo
@@ -135,13 +135,13 @@ var todo = new Todo
 };
 db.Todos.Add(todo);
 await db.SaveChangesAsync();
-Console.WriteLine($"[INFO] Created todo with Id: {todo.Id}");
+Console.WriteLine($"[INFO]  todo oluşturuldu Id: {todo.Id}");
 
 // Verify listing via Query Filter
 var activeProjects = await db.Projects.ToListAsync();
 if (!activeProjects.Any(p => p.Id == project.Id))
 {
-    Console.WriteLine("[ERROR] Created project not found via Query Filter!");
+    Console.WriteLine("[ERROR] Oluşturulan proje bulunamadı!");
     return;
 }
 
