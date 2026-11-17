@@ -15,6 +15,8 @@ public class DescopeAuthService : IDescopeAuthService
     private readonly IConfiguration _configuration;
     private readonly ILogger<DescopeAuthService>? _logger;
     private readonly string _projectId;
+    private readonly string _appId;
+    private readonly string _configUrl;
     private readonly IConfigurationManager<OpenIdConnectConfiguration> _configurationManager;
     private readonly JwtSecurityTokenHandler _tokenHandler;
 
@@ -37,7 +39,24 @@ public class DescopeAuthService : IDescopeAuthService
             throw new InvalidOperationException("Descope:ProjectId is not configured.");
         }
 
-        var metadataAddress = $"https://api.descope.com/{_projectId}/.well-known/jwks.json";
+        _appId = _configuration["Descope:AppId"]
+            ?? _configuration["Descope__AppId"]
+            ?? Environment.GetEnvironmentVariable("DESCOPE_APP_ID")
+            ?? string.Empty;
+
+        _configUrl = _configuration["Descope:ConfigUrl"]
+            ?? _configuration["Descope__ConfigUrl"]
+            ?? Environment.GetEnvironmentVariable("DESCOPE_CONFIG_URL")
+            ?? string.Empty;
+
+        var metadataAddress = !string.IsNullOrWhiteSpace(_configUrl)
+            ? _configUrl
+            : (!string.IsNullOrWhiteSpace(_appId)
+                ? $"https://api.euc1.descope.com/v1/apps/agentic/{_projectId}/{_appId}/.well-known/openid-configuration"
+                : (_projectId.StartsWith("Peuc1", StringComparison.OrdinalIgnoreCase)
+                    ? $"https://api.euc1.descope.com/{_projectId}/.well-known/jwks.json"
+                    : $"https://api.descope.com/{_projectId}/.well-known/jwks.json"));
+
         _configurationManager = configurationManager
             ?? new ConfigurationManager<OpenIdConnectConfiguration>(
                 metadataAddress,
@@ -64,15 +83,38 @@ public class DescopeAuthService : IDescopeAuthService
             throw new UnauthorizedException("Invalid or expired Descope token.", ex);
         }
 
+        var validIssuers = new List<string>
+        {
+            $"https://api.descope.com/{_projectId}",
+            $"https://api.euc1.descope.com/{_projectId}",
+            _projectId
+        };
+
+        if (!string.IsNullOrWhiteSpace(_appId))
+        {
+            validIssuers.Add($"https://api.descope.com/v1/apps/agentic/{_projectId}/{_appId}");
+            validIssuers.Add($"https://api.euc1.descope.com/v1/apps/agentic/{_projectId}/{_appId}");
+        }
+
+        if (!string.IsNullOrWhiteSpace(openIdConfig.Issuer) && !validIssuers.Contains(openIdConfig.Issuer))
+        {
+            validIssuers.Add(openIdConfig.Issuer);
+        }
+
+        var validAudiences = new List<string> { _projectId };
+        if (!string.IsNullOrWhiteSpace(_appId) && !validAudiences.Contains(_appId))
+        {
+            validAudiences.Add(_appId);
+        }
+
         var validationParameters = new TokenValidationParameters
         {
             ValidateIssuerSigningKey = true,
             IssuerSigningKeys = openIdConfig.SigningKeys,
             ValidateIssuer = true,
-            ValidIssuer = $"https://api.descope.com/{_projectId}",
-            ValidIssuers = new[] { $"https://api.descope.com/{_projectId}", _projectId },
+            ValidIssuers = validIssuers,
             ValidateAudience = true,
-            ValidAudience = _projectId,
+            ValidAudiences = validAudiences,
             ValidateLifetime = true,
             ClockSkew = TimeSpan.FromMinutes(2),
             ValidAlgorithms = new[] { SecurityAlgorithms.RsaSha256 }

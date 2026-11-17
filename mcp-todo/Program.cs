@@ -68,6 +68,60 @@ else
 
     var app = webBuilder.Build();
 
+    // RFC 9728: OAuth 2.0 Protected Resource Metadata for Model Context Protocol
+    app.MapGet("/.well-known/oauth-protected-resource", (IConfiguration config, HttpContext httpContext) =>
+    {
+        var serverUrl = config["SERVER_URL"]
+            ?? Environment.GetEnvironmentVariable("SERVER_URL")
+            ?? $"{httpContext.Request.Scheme}://{httpContext.Request.Host}";
+        var projectId = config["Descope:ProjectId"]
+            ?? Environment.GetEnvironmentVariable("DESCOPE_PROJECT_ID")
+            ?? "Peuc13MEWFEtDVhrNkOQ9eLNzk8Bh9sx";
+        var appId = config["Descope:AppId"]
+            ?? Environment.GetEnvironmentVariable("DESCOPE_APP_ID")
+            ?? "RS3MEWRRsPXqQjyj5MOguKgo2sqTi";
+
+        var authServer = !string.IsNullOrWhiteSpace(appId)
+            ? $"https://api.descope.com/v1/apps/agentic/{projectId}/{appId}"
+            : $"https://api.descope.com/{projectId}";
+
+        return Results.Json(new
+        {
+            authorization_servers = new[] { authServer },
+            bearer_methods_supported = new[] { "header" },
+            resource = $"{serverUrl.TrimEnd('/')}/mcp",
+            resource_documentation = $"{serverUrl.TrimEnd('/')}/",
+            scopes_supported = Array.Empty<string>()
+        });
+    });
+
+    // OAuth 401 Challenge Middleware for unauthenticated MCP requests
+    app.Use(async (context, next) =>
+    {
+        var path = context.Request.Path.Value ?? string.Empty;
+        var isMcpRequest = path.StartsWith("/mcp", StringComparison.OrdinalIgnoreCase)
+            || (path == "/" && HttpMethods.IsPost(context.Request.Method));
+
+        if (isMcpRequest && !context.Request.Headers.ContainsKey("Authorization"))
+        {
+            var serverUrl = app.Configuration["SERVER_URL"]
+                ?? Environment.GetEnvironmentVariable("SERVER_URL")
+                ?? $"{context.Request.Scheme}://{context.Request.Host}";
+
+            context.Response.Headers["WWW-Authenticate"] =
+                $"Bearer realm=\"mcp\", resource_metadata=\"{serverUrl.TrimEnd('/')}/.well-known/oauth-protected-resource\"";
+            context.Response.StatusCode = StatusCodes.Status401Unauthorized;
+            await context.Response.WriteAsJsonAsync(new
+            {
+                error = "unauthorized",
+                message = "Authentication required. Please authenticate via OAuth."
+            });
+            return;
+        }
+
+        await next();
+    });
+
     // Map MCP Endpoint at /mcp (e.g. site.com/mcp)
     app.MapMcp("/mcp");
 
