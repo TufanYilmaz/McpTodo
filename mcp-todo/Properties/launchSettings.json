@@ -1,0 +1,10 @@
+{
+  "profiles": {
+    "mcp-todo": {
+      "commandName": "Project"
+    },
+    "Container (Dockerfile)": {
+      "commandName": "Docker"
+    }
+  }
+}
