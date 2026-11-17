@@ -81,13 +81,23 @@ else
             ?? Environment.GetEnvironmentVariable("DESCOPE_APP_ID")
             ?? "RS3MEWRRsPXqQjyj5MOguKgo2sqTi";
 
+        var host = projectId.StartsWith("Peuc1", StringComparison.OrdinalIgnoreCase)
+            ? "https://api.euc1.descope.com"
+            : "https://api.descope.com";
+
         var authServer = !string.IsNullOrWhiteSpace(appId)
-            ? $"https://api.descope.com/v1/apps/agentic/{projectId}/{appId}"
-            : $"https://api.descope.com/{projectId}";
+            ? $"{host}/v1/apps/agentic/{projectId}/{appId}"
+            : $"{host}/{projectId}";
+
+        var authServers = new List<string> { authServer };
+        if (host.Contains("euc1"))
+        {
+            authServers.Add($"https://api.descope.com/v1/apps/agentic/{projectId}/{appId}");
+        }
 
         return Results.Json(new
         {
-            authorization_servers = new[] { authServer },
+            authorization_servers = authServers,
             bearer_methods_supported = new[] { "header" },
             resource = $"{serverUrl.TrimEnd('/')}/mcp",
             resource_documentation = $"{serverUrl.TrimEnd('/')}/",
