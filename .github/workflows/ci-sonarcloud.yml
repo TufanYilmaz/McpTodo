@@ -67,8 +67,8 @@ jobs:
             "/k:${SONAR_PROJECT_KEY}"
             "/d:sonar.token=${SONAR_TOKEN}"
             "/d:sonar.host.url=${SONAR_HOST_URL}"
-            "/d:sonar.cs.opencover.reportsPaths=**/TestResults/**/coverage.opencover.xml"
-            "/d:sonar.coverage.exclusions=**Tests**/*,**/Migrations/*"
+            "/d:sonar.cs.opencover.reportsPaths=**/coverage.opencover.xml"
+            "/d:sonar.coverage.exclusions=**/Program.cs,**/Migrations/**,**Tests**/**"
           )
           if [ -n "${SONAR_ORG}" ]; then
             SONAR_ARGS+=("/o:${SONAR_ORG}")
@@ -87,6 +87,11 @@ jobs:
             --collect:"XPlat Code Coverage" \
             --results-directory ./TestResults \
             -- DataCollectionRunSettings.DataCollectors.DataCollector.Configuration.Format=opencover
+
+      - name: Verify Coverage File Generated
+        run: |
+          echo "Checking generated coverage reports:"
+          find ./TestResults -name "*.xml" || echo "Warning: No coverage XML found in ./TestResults"
 
       - name: End SonarCloud Analysis
         env:
