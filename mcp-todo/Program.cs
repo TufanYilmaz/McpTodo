@@ -118,7 +118,9 @@ static void ConfigureServices(IConfigurationManager configuration, IServiceColle
         ?? Environment.GetEnvironmentVariable("ConnectionStrings__Supabase")
         ?? Environment.GetEnvironmentVariable("SUPABASE_CONNECTION_STRING");
 
-    services.AddScoped<ICurrentUserService, DevCurrentUserService>();
+    services.AddHttpContextAccessor();
+    services.AddSingleton<IDescopeAuthService, DescopeAuthService>();
+    services.AddScoped<ICurrentUserService, DescopeCurrentUserService>();
     services.AddScoped<ProjectTools>();
     services.AddScoped<TodoTools>();
 
