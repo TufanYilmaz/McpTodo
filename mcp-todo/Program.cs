@@ -274,16 +274,13 @@ static void ConfigureServices(IConfigurationManager configuration, IServiceColle
 {
     configuration.AddUserSecrets<AppDbContextFactory>(optional: true);
 
-    var connectionString = configuration.GetConnectionString("Supabase")
+    var rawConnectionString = configuration.GetConnectionString("Supabase")
         ?? configuration["ConnectionStrings:Supabase"]
         ?? Environment.GetEnvironmentVariable("ConnectionStrings__Supabase")
         ?? Environment.GetEnvironmentVariable("SUPABASE_CONNECTION_STRING")
         ?? Environment.GetEnvironmentVariable("DATABASE_URL");
 
-    if (!string.IsNullOrWhiteSpace(connectionString) && connectionString.StartsWith("postgres://", StringComparison.OrdinalIgnoreCase))
-    {
-        connectionString = "postgresql://" + connectionString.Substring("postgres://".Length);
-    }
+    var connectionString = NormalizeConnectionString(rawConnectionString);
 
     if (string.IsNullOrWhiteSpace(connectionString))
     {
@@ -309,6 +306,49 @@ static void ConfigureServices(IConfigurationManager configuration, IServiceColle
             });
         }
     });
+}
+
+static string? NormalizeConnectionString(string? raw)
+{
+    if (string.IsNullOrWhiteSpace(raw)) return raw;
+    raw = raw.Trim();
+
+    // If it's already a standard key-value connection string (contains "Host=" or "Server=")
+    if (raw.Contains("Host=", StringComparison.OrdinalIgnoreCase) || raw.Contains("Server=", StringComparison.OrdinalIgnoreCase))
+    {
+        return raw;
+    }
+
+    if (raw.StartsWith("postgres://", StringComparison.OrdinalIgnoreCase) ||
+        raw.StartsWith("postgresql://", StringComparison.OrdinalIgnoreCase))
+    {
+        try
+        {
+            var uri = new Uri(raw);
+            var userInfo = uri.UserInfo.Split(':');
+            var user = userInfo.Length > 0 ? Uri.UnescapeDataString(userInfo[0]) : "postgres";
+            var pass = userInfo.Length > 1 ? Uri.UnescapeDataString(userInfo[1]) : "";
+            var host = uri.Host;
+            var port = uri.Port > 0 ? uri.Port : 5432;
+            var db = uri.AbsolutePath.TrimStart('/');
+            if (string.IsNullOrWhiteSpace(db)) db = "postgres";
+
+            var sb = new System.Text.StringBuilder();
+            sb.Append($"Host={host};Port={port};Database={db};Username={user};");
+            if (!string.IsNullOrEmpty(pass))
+            {
+                sb.Append($"Password={pass};");
+            }
+            sb.Append("SSL Mode=Require;Trust Server Certificate=true;");
+            return sb.ToString();
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"[WARNING] Failed to parse URI connection string: {ex.Message}");
+        }
+    }
+
+    return raw;
 }
 
 static void RunToolsVerification()
