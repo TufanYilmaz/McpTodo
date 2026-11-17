@@ -68,18 +68,46 @@ else
 
     var app = webBuilder.Build();
 
-    // RFC 9728: OAuth 2.0 Protected Resource Metadata for Model Context Protocol
-    app.MapGet("/.well-known/oauth-protected-resource", (IConfiguration config, HttpContext httpContext) =>
+    static string GetPublicServerUrl(IConfiguration config, HttpContext httpContext)
     {
-        var serverUrl = config["SERVER_URL"]
+        var url = config["SERVER_URL"]
             ?? Environment.GetEnvironmentVariable("SERVER_URL")
             ?? $"{httpContext.Request.Scheme}://{httpContext.Request.Host}";
-        var projectId = config["Descope:ProjectId"]
+
+        if (url.StartsWith("http://", StringComparison.OrdinalIgnoreCase) && !url.Contains("localhost"))
+        {
+            url = "https://" + url.Substring("http://".Length);
+        }
+        return url.TrimEnd('/');
+    }
+
+    static string GetDescopeProjectId(IConfiguration config)
+    {
+        return config["Descope:ProjectId"]
+            ?? config["Descope__ProjectId"]
             ?? Environment.GetEnvironmentVariable("DESCOPE_PROJECT_ID")
-            ?? "Peuc13MEWFEtDVhrNkOQ9eLNzk8Bh9sx";
-        var appId = config["Descope:AppId"]
+            ?? string.Empty;
+    }
+
+    static string GetDescopeAppId(IConfiguration config)
+    {
+        return config["Descope:AppId"]
+            ?? config["Descope__AppId"]
             ?? Environment.GetEnvironmentVariable("DESCOPE_APP_ID")
-            ?? "RS3MEWRRsPXqQjyj5MOguKgo2sqTi";
+            ?? string.Empty;
+    }
+
+    // RFC 9728: OAuth 2.0 Protected Resource Metadata for Model Context Protocol
+    var protectedResourceHandler = (IConfiguration config, HttpContext httpContext) =>
+    {
+        var serverUrl = GetPublicServerUrl(config, httpContext);
+        var projectId = GetDescopeProjectId(config);
+        var appId = GetDescopeAppId(config);
+
+        if (string.IsNullOrWhiteSpace(projectId))
+        {
+            return Results.Problem("DESCOPE_PROJECT_ID environment variable is not configured.", statusCode: StatusCodes.Status500InternalServerError);
+        }
 
         var host = projectId.StartsWith("Peuc1", StringComparison.OrdinalIgnoreCase)
             ? "https://api.euc1.descope.com"
@@ -89,7 +117,7 @@ else
             ? $"{host}/v1/apps/agentic/{projectId}/{appId}"
             : $"{host}/{projectId}";
 
-        var authServers = new List<string> { authServer };
+        var authServers = new List<string> { serverUrl, authServer };
         if (host.Contains("euc1"))
         {
             authServers.Add($"https://api.descope.com/v1/apps/agentic/{projectId}/{appId}");
@@ -99,10 +127,98 @@ else
         {
             authorization_servers = authServers,
             bearer_methods_supported = new[] { "header" },
-            resource = $"{serverUrl.TrimEnd('/')}/mcp",
-            resource_documentation = $"{serverUrl.TrimEnd('/')}/",
+            resource = $"{serverUrl}/mcp",
+            resource_documentation = $"{serverUrl}/",
             scopes_supported = Array.Empty<string>()
         });
+    };
+
+    app.MapGet("/.well-known/oauth-protected-resource", protectedResourceHandler);
+    app.MapGet("/.well-known/oauth-protected-resource/mcp", protectedResourceHandler);
+
+    // RFC 8414: OAuth 2.0 Authorization Server Metadata (Fallback discovery for MCP clients)
+    app.MapGet("/.well-known/oauth-authorization-server", (IConfiguration config, HttpContext httpContext) =>
+    {
+        var serverUrl = GetPublicServerUrl(config, httpContext);
+        var projectId = GetDescopeProjectId(config);
+        var appId = GetDescopeAppId(config);
+
+        if (string.IsNullOrWhiteSpace(projectId) || string.IsNullOrWhiteSpace(appId))
+        {
+            return Results.Problem("DESCOPE_PROJECT_ID or DESCOPE_APP_ID is not configured.", statusCode: StatusCodes.Status500InternalServerError);
+        }
+
+        var host = projectId.StartsWith("Peuc1", StringComparison.OrdinalIgnoreCase)
+            ? "https://api.euc1.descope.com"
+            : "https://api.descope.com";
+
+        return Results.Json(new
+        {
+            issuer = serverUrl,
+            authorization_endpoint = $"{host}/oauth2/v1/apps/agentic/{projectId}/{appId}/authorize",
+            token_endpoint = $"{host}/oauth2/v1/apps/agentic/{projectId}/{appId}/token",
+            jwks_uri = $"{host}/v1/apps/agentic/{projectId}/{appId}/.well-known/jwks.json",
+            registration_endpoint = $"{serverUrl}/register",
+            response_types_supported = new[] { "code" },
+            grant_types_supported = new[] { "authorization_code", "refresh_token" },
+            token_endpoint_auth_methods_supported = new[] { "none", "client_secret_post" },
+            code_challenge_methods_supported = new[] { "S256" }
+        });
+    });
+
+    // RFC 7591: OAuth 2.0 Dynamic Client Registration Endpoint
+    app.MapPost("/register", async (HttpContext httpContext, IConfiguration config) =>
+    {
+        var appId = GetDescopeAppId(config);
+        if (string.IsNullOrWhiteSpace(appId))
+        {
+            return Results.Problem("DESCOPE_APP_ID environment variable is not configured.", statusCode: StatusCodes.Status500InternalServerError);
+        }
+
+        string clientName = "Claude";
+        var redirectUris = new List<string> { "https://claude.ai/api/mcp/auth_callback" };
+
+        try
+        {
+            using var reader = new System.IO.StreamReader(httpContext.Request.Body);
+            var body = await reader.ReadToEndAsync();
+            if (!string.IsNullOrWhiteSpace(body))
+            {
+                using var doc = System.Text.Json.JsonDocument.Parse(body);
+                if (doc.RootElement.TryGetProperty("client_name", out var nameProp))
+                {
+                    clientName = nameProp.GetString() ?? clientName;
+                }
+                if (doc.RootElement.TryGetProperty("redirect_uris", out var urisProp) && urisProp.ValueKind == System.Text.Json.JsonValueKind.Array)
+                {
+                    redirectUris.Clear();
+                    foreach (var el in urisProp.EnumerateArray())
+                    {
+                        var uri = el.GetString();
+                        if (!string.IsNullOrWhiteSpace(uri))
+                        {
+                            redirectUris.Add(uri);
+                        }
+                    }
+                }
+            }
+        }
+        catch
+        {
+            // Use defaults if body parse fails
+        }
+
+        var response = new
+        {
+            client_id = appId,
+            client_name = clientName,
+            redirect_uris = redirectUris,
+            grant_types = new[] { "authorization_code" },
+            response_types = new[] { "code" },
+            token_endpoint_auth_method = "none"
+        };
+
+        return Results.Json(response, statusCode: StatusCodes.Status201Created);
     });
 
     // OAuth 401 Challenge Middleware for unauthenticated MCP requests
@@ -114,12 +230,10 @@ else
 
         if (isMcpRequest && !context.Request.Headers.ContainsKey("Authorization"))
         {
-            var serverUrl = app.Configuration["SERVER_URL"]
-                ?? Environment.GetEnvironmentVariable("SERVER_URL")
-                ?? $"{context.Request.Scheme}://{context.Request.Host}";
+            var serverUrl = GetPublicServerUrl(app.Configuration, context);
 
             context.Response.Headers["WWW-Authenticate"] =
-                $"Bearer realm=\"mcp\", resource_metadata=\"{serverUrl.TrimEnd('/')}/.well-known/oauth-protected-resource\"";
+                $"Bearer realm=\"mcp\", resource_metadata=\"{serverUrl}/.well-known/oauth-protected-resource/mcp\"";
             context.Response.StatusCode = StatusCodes.Status401Unauthorized;
             await context.Response.WriteAsJsonAsync(new
             {
