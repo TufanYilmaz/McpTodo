@@ -1,0 +1,92 @@
+name: CI Build & SonarCloud Analysis
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    types: [opened, synchronize, reopened]
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  build-and-analyze:
+    name: Build & SonarCloud Analysis
+    runs-on: ubuntu-latest
+
+    env:
+      SONAR_PROJECT_KEY: ${{ vars.SONAR_PROJECT_KEY || 'TufanYilmaz_McpTodo' }}
+      SONAR_ORG: ${{ vars.SONAR_ORGANIZATION || 'tufanyilmaz' }}
+      SONAR_HOST_URL: ${{ vars.SONAR_HOST_URL || 'https://sonarcloud.io' }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # SonarCloud requires full git history for accurate blame and change analysis
+
+      - name: Setup Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Setup .NET 8 SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Cache SonarCloud packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.sonar/cache
+          key: ${{ runner.os }}-sonar
+          restore-keys: ${{ runner.os }}-sonar
+
+      - name: Install SonarScanner for .NET
+        run: |
+          dotnet tool install --global dotnet-sonarscanner || dotnet tool update --global dotnet-sonarscanner
+
+      - name: Restore dependencies
+        run: dotnet restore mcp-todo.sln
+
+      - name: Begin SonarCloud Analysis
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+        run: |
+          SONAR_ARGS=(
+            "/k:${SONAR_PROJECT_KEY}"
+            "/d:sonar.token=${SONAR_TOKEN}"
+            "/d:sonar.host.url=${SONAR_HOST_URL}"
+            "/d:sonar.cs.opencover.reportsPaths=**/TestResults/**/coverage.opencover.xml"
+            "/d:sonar.coverage.exclusions=**Tests**/*,**/Migrations/*"
+          )
+          if [ -n "${SONAR_ORG}" ]; then
+            SONAR_ARGS+=("/o:${SONAR_ORG}")
+          fi
+          dotnet-sonarscanner begin "${SONAR_ARGS[@]}"
+
+      - name: Build Solution
+        run: dotnet build mcp-todo.sln --no-restore --configuration Release
+
+      - name: Run Unit Tests with OpenCover Coverage
+        run: |
+          dotnet test mcp-todo.sln \
+            --no-build \
+            --configuration Release \
+            --verbosity normal \
+            --collect:"XPlat Code Coverage" \
+            --results-directory ./TestResults \
+            -- DataCollectionRunSettings.DataCollectors.DataCollector.Configuration.Format=opencover
+
+      - name: End SonarCloud Analysis
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+        run: dotnet-sonarscanner end /d:sonar.token="${SONAR_TOKEN}"
