@@ -24,28 +24,41 @@ public class ProjectTools
     [Description("Giriş yapmış kullanıcının aktif projelerini ve görev sayılarını okunaklı bir Markdown tablosu olarak listeler.")]
     public async Task<string> ListProjectsAsync(CancellationToken cancellationToken = default)
     {
-        var projects = await _db.Projects
-            .Include(p => p.Todos)
-            .OrderBy(p => p.Id)
-            .ToListAsync(cancellationToken);
-
-        if (projects.Count == 0)
+        try
         {
-            return "Henüz kayıtlı bir projeniz bulunmuyor. Yeni bir proje oluşturmak için 'project_create' aracını kullanabilirsiniz.";
+            var projects = await _db.Projects
+                .Include(p => p.Todos)
+                .OrderBy(p => p.Id)
+                .ToListAsync(cancellationToken);
+
+            if (projects.Count == 0)
+            {
+                return "Henüz kayıtlı bir projeniz bulunmuyor. Yeni bir proje oluşturmak için 'project_create' aracını kullanabilirsiniz.";
+            }
+
+            var sb = new StringBuilder();
+            sb.AppendLine("| ID | Proje Adı | Açıklama | Görev Sayısı |");
+            sb.AppendLine("|---|---|---|---|");
+
+            foreach (var p in projects)
+            {
+                var activeTodoCount = p.Todos.Count(t => !t.IsDeleted);
+                var description = string.IsNullOrWhiteSpace(p.Description) ? "-" : p.Description.Trim();
+                sb.AppendLine($"| {p.Id} | {p.Name} | {description} | {activeTodoCount} |");
+            }
+
+            return sb.ToString().TrimEnd();
         }
-
-        var sb = new StringBuilder();
-        sb.AppendLine("| ID | Proje Adı | Açıklama | Görev Sayısı |");
-        sb.AppendLine("|---|---|---|---|");
-
-        foreach (var p in projects)
+        catch (mcp_todo.Exceptions.UnauthorizedException ex)
         {
-            var activeTodoCount = p.Todos.Count(t => !t.IsDeleted);
-            var description = string.IsNullOrWhiteSpace(p.Description) ? "-" : p.Description.Trim();
-            sb.AppendLine($"| {p.Id} | {p.Name} | {description} | {activeTodoCount} |");
+            Console.Error.WriteLine($"[ProjectTools.ListProjectsAsync] Unauthorized: {ex.Message}");
+            return $"Hata: Kimlik doğrulama başarısız oldu ({ex.Message}). Lütfen oturum açtığınızdan emin olun.";
         }
-
-        return sb.ToString().TrimEnd();
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"[ProjectTools.ListProjectsAsync] Error: {ex}");
+            return $"Hata: Projeler listelenirken bir hata oluştu ({ex.Message})";
+        }
     }
 
     [McpServerTool(Name = "project_create", Title = "Yeni Proje Oluştur")]
@@ -60,21 +73,34 @@ public class ProjectTools
             return "Hata: Proje adı boş olamaz.";
         }
 
-        var userId = _currentUserService.GetRequiredUserId();
-        var project = new Project
+        try
         {
-            UserId = userId,
-            Name = name.Trim(),
-            Description = string.IsNullOrWhiteSpace(description) ? null : description.Trim(),
-            IsDeleted = false,
-            CreatedAt = DateTime.UtcNow,
-            UpdatedAt = DateTime.UtcNow
-        };
+            var userId = _currentUserService.GetRequiredUserId();
+            var project = new Project
+            {
+                UserId = userId,
+                Name = name.Trim(),
+                Description = string.IsNullOrWhiteSpace(description) ? null : description.Trim(),
+                IsDeleted = false,
+                CreatedAt = DateTime.UtcNow,
+                UpdatedAt = DateTime.UtcNow
+            };
 
-        _db.Projects.Add(project);
-        await _db.SaveChangesAsync(cancellationToken);
+            _db.Projects.Add(project);
+            await _db.SaveChangesAsync(cancellationToken);
 
-        return $"Başarılı: Proje oluşturuldu (ID: {project.Id})";
+            return $"Başarılı: Proje oluşturuldu (ID: {project.Id})";
+        }
+        catch (mcp_todo.Exceptions.UnauthorizedException ex)
+        {
+            Console.Error.WriteLine($"[ProjectTools.CreateProjectAsync] Unauthorized: {ex.Message}");
+            return $"Hata: Kimlik doğrulama başarısız oldu ({ex.Message}). Lütfen oturum açtığınızdan veya geçerli bir token sağladığınızdan emin olun.";
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"[ProjectTools.CreateProjectAsync] Error: {ex}");
+            return $"Hata: Proje oluşturulamadı ({ex.Message})";
+        }
     }
 
     [McpServerTool(Name = "project_delete", Title = "Proje Sil")]
@@ -83,29 +109,42 @@ public class ProjectTools
         [Description("Silinecek projenin kimlik numarası (ID)")] long projectId,
         CancellationToken cancellationToken = default)
     {
-        var project = await _db.Projects
-            .Include(p => p.Todos)
-            .FirstOrDefaultAsync(p => p.Id == projectId, cancellationToken);
-
-        if (project == null)
+        try
         {
-            return $"Kayıt bulunamadı veya erişim yetkiniz yok (ID: {projectId})";
+            var project = await _db.Projects
+                .Include(p => p.Todos)
+                .FirstOrDefaultAsync(p => p.Id == projectId, cancellationToken);
+
+            if (project == null)
+            {
+                return $"Kayıt bulunamadı veya erişim yetkiniz yok (ID: {projectId})";
+            }
+
+            var activeTodos = project.Todos.Where(t => !t.IsDeleted).ToList();
+            var now = DateTime.UtcNow;
+
+            foreach (var todo in activeTodos)
+            {
+                todo.IsDeleted = true;
+                todo.UpdatedAt = now;
+            }
+
+            project.IsDeleted = true;
+            project.UpdatedAt = now;
+
+            await _db.SaveChangesAsync(cancellationToken);
+
+            return $"Başarılı: Proje ve bağlı {activeTodos.Count} adet görev silindi (ID: {projectId})";
         }
-
-        var activeTodos = project.Todos.Where(t => !t.IsDeleted).ToList();
-        var now = DateTime.UtcNow;
-
-        foreach (var todo in activeTodos)
+        catch (mcp_todo.Exceptions.UnauthorizedException ex)
         {
-            todo.IsDeleted = true;
-            todo.UpdatedAt = now;
+            Console.Error.WriteLine($"[ProjectTools.DeleteProjectAsync] Unauthorized: {ex.Message}");
+            return $"Hata: Kimlik doğrulama başarısız oldu ({ex.Message}).";
         }
-
-        project.IsDeleted = true;
-        project.UpdatedAt = now;
-
-        await _db.SaveChangesAsync(cancellationToken);
-
-        return $"Başarılı: Proje ve bağlı {activeTodos.Count} adet görev silindi (ID: {projectId})";
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"[ProjectTools.DeleteProjectAsync] Error: {ex}");
+            return $"Hata: Proje silinirken bir hata oluştu ({ex.Message})";
+        }
     }
 }

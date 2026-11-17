@@ -277,7 +277,18 @@ static void ConfigureServices(IConfigurationManager configuration, IServiceColle
     var connectionString = configuration.GetConnectionString("Supabase")
         ?? configuration["ConnectionStrings:Supabase"]
         ?? Environment.GetEnvironmentVariable("ConnectionStrings__Supabase")
-        ?? Environment.GetEnvironmentVariable("SUPABASE_CONNECTION_STRING");
+        ?? Environment.GetEnvironmentVariable("SUPABASE_CONNECTION_STRING")
+        ?? Environment.GetEnvironmentVariable("DATABASE_URL");
+
+    if (!string.IsNullOrWhiteSpace(connectionString) && connectionString.StartsWith("postgres://", StringComparison.OrdinalIgnoreCase))
+    {
+        connectionString = "postgresql://" + connectionString.Substring("postgres://".Length);
+    }
+
+    if (string.IsNullOrWhiteSpace(connectionString))
+    {
+        Console.Error.WriteLine("[WARNING] No Supabase/Database connection string found! Please set SUPABASE_CONNECTION_STRING or DATABASE_URL.");
+    }
 
     services.AddHttpContextAccessor();
     services.AddSingleton<IDescopeAuthService, DescopeAuthService>();

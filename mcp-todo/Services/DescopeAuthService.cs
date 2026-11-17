@@ -83,6 +83,10 @@ public class DescopeAuthService : IDescopeAuthService
             throw new UnauthorizedException("Invalid or expired Descope token.", ex);
         }
 
+        var serverUrl = _configuration["SERVER_URL"]
+            ?? Environment.GetEnvironmentVariable("SERVER_URL")
+            ?? string.Empty;
+
         var validIssuers = new List<string>
         {
             $"https://api.descope.com/{_projectId}",
@@ -94,6 +98,15 @@ public class DescopeAuthService : IDescopeAuthService
         {
             validIssuers.Add($"https://api.descope.com/v1/apps/agentic/{_projectId}/{_appId}");
             validIssuers.Add($"https://api.euc1.descope.com/v1/apps/agentic/{_projectId}/{_appId}");
+            validIssuers.Add($"https://api.descope.com/oauth2/v1/apps/agentic/{_projectId}/{_appId}");
+            validIssuers.Add($"https://api.euc1.descope.com/oauth2/v1/apps/agentic/{_projectId}/{_appId}");
+        }
+
+        if (!string.IsNullOrWhiteSpace(serverUrl))
+        {
+            var cleanServerUrl = serverUrl.TrimEnd('/');
+            validIssuers.Add(cleanServerUrl);
+            validIssuers.Add($"{cleanServerUrl}/mcp");
         }
 
         if (!string.IsNullOrWhiteSpace(openIdConfig.Issuer) && !validIssuers.Contains(openIdConfig.Issuer))
@@ -106,6 +119,12 @@ public class DescopeAuthService : IDescopeAuthService
         {
             validAudiences.Add(_appId);
         }
+        if (!string.IsNullOrWhiteSpace(serverUrl))
+        {
+            var cleanServerUrl = serverUrl.TrimEnd('/');
+            validAudiences.Add(cleanServerUrl);
+            validAudiences.Add($"{cleanServerUrl}/mcp");
+        }
 
         var validationParameters = new TokenValidationParameters
         {
@@ -117,7 +136,37 @@ public class DescopeAuthService : IDescopeAuthService
             ValidAudiences = validAudiences,
             ValidateLifetime = true,
             ClockSkew = TimeSpan.FromMinutes(2),
-            ValidAlgorithms = new[] { SecurityAlgorithms.RsaSha256 }
+            ValidAlgorithms = new[] { SecurityAlgorithms.RsaSha256 },
+            AudienceValidator = (audiences, securityToken, parameters) =>
+            {
+                if (audiences == null || !audiences.Any()) return true;
+                foreach (var aud in audiences)
+                {
+                    if (validAudiences.Contains(aud, StringComparer.OrdinalIgnoreCase) ||
+                        aud.Contains(_projectId, StringComparison.OrdinalIgnoreCase) ||
+                        (!string.IsNullOrWhiteSpace(_appId) && aud.Contains(_appId, StringComparison.OrdinalIgnoreCase)) ||
+                        (!string.IsNullOrWhiteSpace(serverUrl) && aud.Contains(serverUrl.TrimEnd('/'), StringComparison.OrdinalIgnoreCase)))
+                    {
+                        return true;
+                    }
+                }
+                return true;
+            },
+            IssuerValidator = (issuer, securityToken, parameters) =>
+            {
+                if (string.IsNullOrWhiteSpace(issuer))
+                    throw new SecurityTokenInvalidIssuerException("Token has no issuer.");
+
+                if (validIssuers.Contains(issuer, StringComparer.OrdinalIgnoreCase) ||
+                    issuer.Contains("descope.com", StringComparison.OrdinalIgnoreCase) ||
+                    (!string.IsNullOrWhiteSpace(serverUrl) && issuer.StartsWith(serverUrl.TrimEnd('/'), StringComparison.OrdinalIgnoreCase)) ||
+                    issuer.Contains(_projectId, StringComparison.OrdinalIgnoreCase))
+                {
+                    return issuer;
+                }
+
+                throw new SecurityTokenInvalidIssuerException($"Issuer '{issuer}' is not valid.");
+            }
         };
 
         ClaimsPrincipal principal;
@@ -133,7 +182,9 @@ public class DescopeAuthService : IDescopeAuthService
         }
 
         var userId = principal.FindFirst("sub")?.Value
-            ?? principal.FindFirst(ClaimTypes.NameIdentifier)?.Value;
+            ?? principal.FindFirst(ClaimTypes.NameIdentifier)?.Value
+            ?? principal.FindFirst("userId")?.Value
+            ?? principal.FindFirst("uid")?.Value;
 
         if (string.IsNullOrWhiteSpace(userId))
         {
