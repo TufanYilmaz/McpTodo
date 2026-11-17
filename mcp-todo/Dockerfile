@@ -1,28 +1,34 @@
-# See https://aka.ms/customizecontainer to learn how to customize your debug container and how Visual Studio uses this Dockerfile to build your images for faster debugging.
+# ==============================================================================
+# Multi-Stage Dockerfile for Model Context Protocol (MCP) Todo Server
+# Complies with: D-33 (alpine/runtime non-root), D-35 & CD-01 (zero secrets), CD-03
+# ==============================================================================
 
-# This stage is used when running from VS in fast mode (Default for Debug configuration)
-FROM mcr.microsoft.com/dotnet/runtime:8.0 AS base
-USER $APP_UID
-WORKDIR /app
-
-
-# This stage is used to build the service project
+# ------------------------------------------------------------------------------
+# Stage 1: Build & Publish
+# ------------------------------------------------------------------------------
 FROM mcr.microsoft.com/dotnet/sdk:8.0 AS build
-ARG BUILD_CONFIGURATION=Release
 WORKDIR /src
-COPY ["mcp-todo/mcp-todo.csproj", "mcp-todo/"]
-RUN dotnet restore "./mcp-todo/mcp-todo.csproj"
+
+# Layer caching: copy project file and restore dependencies first
+COPY ["mcp-todo.csproj", "./"]
+RUN dotnet restore "mcp-todo.csproj"
+
+# Copy remaining source code and publish release binaries
 COPY . .
-WORKDIR "/src/mcp-todo"
-RUN dotnet build "./mcp-todo.csproj" -c $BUILD_CONFIGURATION -o /app/build
+RUN dotnet publish "mcp-todo.csproj" -c Release -o /app/publish /p:UseAppHost=false
 
-# This stage is used to publish the service project to be copied to the final stage
-FROM build AS publish
-ARG BUILD_CONFIGURATION=Release
-RUN dotnet publish "./mcp-todo.csproj" -c $BUILD_CONFIGURATION -o /app/publish /p:UseAppHost=false
-
-# This stage is used in production or when running from VS in regular mode (Default when not using the Debug configuration)
-FROM base AS final
+# ------------------------------------------------------------------------------
+# Stage 2: Final Minimal Runtime
+# ------------------------------------------------------------------------------
+FROM mcr.microsoft.com/dotnet/runtime:8.0-alpine AS final
 WORKDIR /app
-COPY --from=publish /app/publish .
+
+# Security Hardening (D-33, T-06-03): Run as unprivileged non-root user
+USER $APP_UID
+
+# Copy compiled application from build stage
+COPY --from=build /app/publish .
+
+# Zero-Secret Rule (D-35, CD-01): Credentials must be injected via runtime environment variables
+# Expected env vars: ConnectionStrings__Supabase, DESCOPE_PROJECT_ID, DESCOPE_USER_TOKEN
 ENTRYPOINT ["dotnet", "mcp-todo.dll"]
